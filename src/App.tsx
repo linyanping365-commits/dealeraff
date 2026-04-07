@@ -48,7 +48,7 @@ import {
   signOut,
   onAuthStateChanged
 } from 'firebase/auth';
-import { doc, setDoc, collection, onSnapshot, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { offersData } from './offersData';
 
 const data = [
@@ -74,14 +74,39 @@ export default function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [adminTab, setAdminTab] = useState('link-management');
   const [registeredUsers, setRegisteredUsers] = useState<any[]>([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [editingUser, setEditingUser] = useState<any | null>(null);
+  const [editForm, setEditForm] = useState({
+    availableBalance: 0,
+    pendingBalance: 0,
+    totalEarned: 0,
+    totalWithdrawals: 0,
+    taskName: 'Manual Adjustment',
+    taskAmount: 10.00
+  });
 
   const itemsPerPage = 50;
   const totalPages = Math.ceil(offersData.length / itemsPerPage);
   const currentOffers = offersData.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setIsAuthenticated(!!user);
+      if (user) {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          if (userDoc.exists()) {
+            setIsAdmin(userDoc.data().role === 'admin' || user.email === '890305@wty.com');
+          } else {
+            setIsAdmin(user.email === '890305@wty.com');
+          }
+        } catch (error) {
+          console.error("Error fetching user role:", error);
+          setIsAdmin(user.email === '890305@wty.com');
+        }
+      } else {
+        setIsAdmin(false);
+      }
       setIsLoading(false);
     });
     return () => unsubscribe();
@@ -93,7 +118,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user && currentView === 'admin' && adminTab === 'user-management') {
+    if (isAuthenticated && currentView === 'admin' && adminTab === 'user-management') {
       const usersRef = collection(db, 'users');
       const unsubscribe = onSnapshot(usersRef, (snapshot) => {
         const usersList = snapshot.docs.map(doc => ({
@@ -106,7 +131,7 @@ export default function App() {
       });
       return () => unsubscribe();
     }
-  }, [user, currentView, adminTab]);
+  }, [isAuthenticated, currentView, adminTab]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,8 +147,10 @@ export default function App() {
       // Save or update user in Firestore
       if (userCredential && userCredential.user) {
         const userRef = doc(db, 'users', userCredential.user.uid);
+        const isDefaultAdmin = userCredential.user.email === '890305@wty.com';
         await setDoc(userRef, {
           email: userCredential.user.email,
+          role: isDefaultAdmin ? 'admin' : 'user',
           lastLogin: serverTimestamp(),
           createdAt: userCredential.user.metadata.creationTime ? new Date(userCredential.user.metadata.creationTime) : serverTimestamp()
         }, { merge: true });
@@ -153,6 +180,38 @@ export default function App() {
     hour12: false,
     timeZoneName: 'short'
   });
+
+  const handleEditUser = (user: any) => {
+    setEditingUser(user);
+    setEditForm({
+      availableBalance: user.availableBalance || 0,
+      pendingBalance: user.pendingBalance || 0,
+      totalEarned: user.totalEarned || 0,
+      totalWithdrawals: user.totalWithdrawals || 0,
+      taskName: 'Manual Adjustment',
+      taskAmount: 10.00
+    });
+  };
+
+  const handleUpdateUser = async () => {
+    if (!editingUser) return;
+    try {
+      const userRef = doc(db, 'users', editingUser.id);
+      await setDoc(userRef, {
+        availableBalance: Number(editForm.availableBalance),
+        pendingBalance: Number(editForm.pendingBalance),
+        totalEarned: Number(editForm.totalEarned),
+        totalWithdrawals: Number(editForm.totalWithdrawals),
+      }, { merge: true });
+      
+      // If we wanted to add a task to a subcollection, we could do it here
+      // e.g. await addDoc(collection(userRef, 'tasks'), { name: editForm.taskName, amount: Number(editForm.taskAmount), date: serverTimestamp() });
+      
+      setEditingUser(null);
+    } catch (error) {
+      console.error("Error updating user:", error);
+    }
+  };
 
   if (isLoading) {
     return <div className="flex h-screen w-full items-center justify-center bg-[#1a1e2d] text-white">Loading...</div>;
@@ -332,13 +391,15 @@ export default function App() {
             <Wallet size={18} />
             <span className="font-medium">Wallet</span>
           </button>
-          <button 
-            onClick={() => setCurrentView('admin')}
-            className={`w-full flex items-center gap-3 px-6 py-3 mx-4 rounded-md transition-colors ${currentView === 'admin' ? 'bg-[#635bff] text-white' : 'hover:text-white hover:bg-white/5'}`}
-          >
-            <SlidersHorizontal size={18} />
-            <span className="font-medium">Admin</span>
-          </button>
+          {isAdmin && (
+            <button 
+              onClick={() => setCurrentView('admin')}
+              className={`w-full flex items-center gap-3 px-6 py-3 mx-4 rounded-md transition-colors ${currentView === 'admin' ? 'bg-[#635bff] text-white' : 'hover:text-white hover:bg-white/5'}`}
+            >
+              <SlidersHorizontal size={18} />
+              <span className="font-medium">Admin</span>
+            </button>
+          )}
           <button 
             onClick={() => setCurrentView('notifications')}
             className={`w-full flex items-center gap-3 px-6 py-3 mx-4 rounded-md transition-colors ${currentView === 'notifications' ? 'bg-[#635bff] text-white' : 'hover:text-white hover:bg-white/5'}`}
@@ -821,7 +882,7 @@ export default function App() {
         )}
 
         {/* Admin Content */}
-        {currentView === 'admin' && (
+        {currentView === 'admin' && isAdmin && (
           <div className="flex-1 overflow-auto p-8 bg-[#f8f9fa]">
             <div className="max-w-6xl mx-auto">
               {/* Header */}
@@ -916,9 +977,10 @@ export default function App() {
 
                   {/* Table Header */}
                   <div className="grid grid-cols-12 gap-4 px-6 py-4 border-b border-gray-100 bg-white">
-                    <div className="col-span-4 text-xs font-bold text-gray-400 uppercase tracking-wider">EMAIL</div>
-                    <div className="col-span-4 text-xs font-bold text-gray-400 uppercase tracking-wider">CREATED AT</div>
-                    <div className="col-span-4 text-xs font-bold text-gray-400 uppercase tracking-wider">LAST LOGIN</div>
+                    <div className="col-span-3 text-xs font-bold text-gray-400 uppercase tracking-wider">EMAIL</div>
+                    <div className="col-span-3 text-xs font-bold text-gray-400 uppercase tracking-wider">CREATED AT</div>
+                    <div className="col-span-3 text-xs font-bold text-gray-400 uppercase tracking-wider">LAST LOGIN</div>
+                    <div className="col-span-3 text-xs font-bold text-gray-400 uppercase tracking-wider text-right">ACTIONS</div>
                   </div>
 
                   {/* Table Body */}
@@ -930,12 +992,20 @@ export default function App() {
                     ) : (
                       registeredUsers.map((u) => (
                         <div key={u.id} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50 transition-colors">
-                          <div className="col-span-4 text-sm font-medium text-[#3b4256] truncate pr-4">{u.email}</div>
-                          <div className="col-span-4 text-sm text-gray-500">
+                          <div className="col-span-3 text-sm font-medium text-[#3b4256] truncate pr-4">{u.email}</div>
+                          <div className="col-span-3 text-sm text-gray-500">
                             {u.createdAt?.toDate ? u.createdAt.toDate().toLocaleString() : 'N/A'}
                           </div>
-                          <div className="col-span-4 text-sm text-gray-500">
+                          <div className="col-span-3 text-sm text-gray-500">
                             {u.lastLogin?.toDate ? u.lastLogin.toDate().toLocaleString() : 'N/A'}
+                          </div>
+                          <div className="col-span-3 text-right">
+                            <button 
+                              onClick={() => handleEditUser(u)}
+                              className="px-3 py-1 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded text-xs font-medium transition-colors"
+                            >
+                              Edit
+                            </button>
                           </div>
                         </div>
                       ))
@@ -994,6 +1064,119 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Edit User Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white">
+              <h2 className="text-lg font-bold text-[#1e293b]">Edit User: {editingUser.email}</h2>
+              <button 
+                onClick={() => setEditingUser(null)}
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 overflow-y-auto">
+              <div className="mb-6">
+                <h3 className="text-xs font-bold text-[#94a3b8] uppercase tracking-wider mb-4">VIRTUAL BALANCE SETTINGS</h3>
+                
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Available Balance ($)</label>
+                    <input 
+                      type="number" 
+                      value={editForm.availableBalance}
+                      onChange={(e) => setEditForm({...editForm, availableBalance: parseFloat(e.target.value) || 0})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Pending Balance ($)</label>
+                    <input 
+                      type="number" 
+                      value={editForm.pendingBalance}
+                      onChange={(e) => setEditForm({...editForm, pendingBalance: parseFloat(e.target.value) || 0})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4 mb-2">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Total Earned ($)</label>
+                    <input 
+                      type="number" 
+                      value={editForm.totalEarned}
+                      onChange={(e) => setEditForm({...editForm, totalEarned: parseFloat(e.target.value) || 0})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Total Withdrawals ($)</label>
+                    <input 
+                      type="number" 
+                      value={editForm.totalWithdrawals}
+                      onChange={(e) => setEditForm({...editForm, totalWithdrawals: parseFloat(e.target.value) || 0})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-gray-400 italic">* These values will be reflected directly on the user's dashboard.</p>
+              </div>
+
+              <div className="border-t border-gray-100 pt-6">
+                <h3 className="text-xs font-bold text-[#94a3b8] uppercase tracking-wider mb-4">ADD VIRTUAL TASK (INCREMENTAL)</h3>
+                
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Task Name</label>
+                    <input 
+                      type="text" 
+                      value={editForm.taskName}
+                      onChange={(e) => setEditForm({...editForm, taskName: e.target.value})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Amount ($)</label>
+                    <input 
+                      type="number" 
+                      value={editForm.taskAmount}
+                      onChange={(e) => setEditForm({...editForm, taskAmount: parseFloat(e.target.value) || 0})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <button className="w-full py-2.5 bg-[#ecfdf5] text-[#059669] font-bold text-sm rounded-md hover:bg-[#d1fae5] transition-colors">
+                  + Add This Task to User History
+                </button>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 border-t border-gray-100 bg-white flex justify-between gap-4">
+              <button 
+                onClick={() => setEditingUser(null)}
+                className="flex-1 py-2.5 bg-white border border-gray-200 text-gray-600 font-bold text-sm rounded-md hover:bg-gray-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleUpdateUser}
+                className="flex-1 py-2.5 bg-[#5b45ff] text-white font-bold text-sm rounded-md hover:bg-[#4f3ce0] transition-colors"
+              >
+                Update Data
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
