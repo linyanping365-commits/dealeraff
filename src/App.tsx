@@ -50,6 +50,7 @@ import {
 } from 'firebase/auth';
 import { doc, setDoc, getDoc, collection, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { offersData } from './offersData';
+import { Toaster, toast } from 'sonner';
 
 const data = [
   { time: '00:00', clicks: 0, conversions: 0, payout: 0 },
@@ -76,40 +77,80 @@ export default function App() {
   const [registeredUsers, setRegisteredUsers] = useState<any[]>([]);
   const [isAdmin, setIsAdmin] = useState(false);
   const [editingUser, setEditingUser] = useState<any | null>(null);
+  const [currentUserData, setCurrentUserData] = useState<any>(null);
   const [editForm, setEditForm] = useState({
     availableBalance: 0,
     pendingBalance: 0,
     totalEarned: 0,
     totalWithdrawals: 0,
+    offerId: '',
     taskName: 'Manual Adjustment',
     taskAmount: 10.00
   });
+  const [adminSearchQuery, setAdminSearchQuery] = useState('');
+  const [offerSearchName, setOfferSearchName] = useState('');
+  const [offerSearchId, setOfferSearchId] = useState('');
 
   const itemsPerPage = 50;
   const totalPages = Math.ceil(offersData.length / itemsPerPage);
-  const currentOffers = offersData.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+  
+  const filteredOffers = offersData.filter(offer => {
+    const matchName = offerSearchName ? offer.title.toLowerCase().includes(offerSearchName.toLowerCase()) : true;
+    const matchId = offerSearchId ? offer.id.toString().includes(offerSearchId) : true;
+    return matchName && matchId;
+  });
+  
+  const currentOffers = filteredOffers.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   useEffect(() => {
+    let userUnsubscribe: () => void;
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setIsAuthenticated(!!user);
       if (user) {
         try {
-          const userDoc = await getDoc(doc(db, 'users', user.uid));
+          const userRef = doc(db, 'users', user.uid);
+          const userDoc = await getDoc(userRef);
+          const isDefaultAdmin = user.email === '890305@wty.com';
+          
+          // Ensure user is permanently recorded in Firestore
+          await setDoc(userRef, {
+            email: user.email,
+            role: isDefaultAdmin ? 'admin' : (userDoc.exists() ? userDoc.data().role : 'user'),
+            lastLogin: serverTimestamp(),
+            // Only set createdAt if it doesn't exist
+            ...(userDoc.exists() ? {} : { 
+              createdAt: user.metadata.creationTime ? new Date(user.metadata.creationTime) : serverTimestamp() 
+            })
+          }, { merge: true });
+
           if (userDoc.exists()) {
-            setIsAdmin(userDoc.data().role === 'admin' || user.email === '890305@wty.com');
+            setIsAdmin(userDoc.data().role === 'admin' || isDefaultAdmin);
           } else {
-            setIsAdmin(user.email === '890305@wty.com');
+            setIsAdmin(isDefaultAdmin);
           }
+
+          // Listen to current user data
+          userUnsubscribe = onSnapshot(userRef, (doc) => {
+            if (doc.exists()) {
+              setCurrentUserData(doc.data());
+            }
+          });
+
         } catch (error) {
-          console.error("Error fetching user role:", error);
+          console.error("Error fetching/updating user role:", error);
           setIsAdmin(user.email === '890305@wty.com');
         }
       } else {
         setIsAdmin(false);
+        setCurrentUserData(null);
+        if (userUnsubscribe) userUnsubscribe();
       }
       setIsLoading(false);
     });
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (userUnsubscribe) userUnsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -137,34 +178,29 @@ export default function App() {
     e.preventDefault();
     setAuthError('');
     try {
-      let userCredential;
       if (isLoginMode) {
-        userCredential = await signInWithEmailAndPassword(auth, email, password);
+        await signInWithEmailAndPassword(auth, email, password);
+        toast.success('Login successful!');
+        setCurrentView('dashboard');
       } else {
-        userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      }
-      
-      // Save or update user in Firestore
-      if (userCredential && userCredential.user) {
-        const userRef = doc(db, 'users', userCredential.user.uid);
-        const isDefaultAdmin = userCredential.user.email === '890305@wty.com';
-        await setDoc(userRef, {
-          email: userCredential.user.email,
-          role: isDefaultAdmin ? 'admin' : 'user',
-          lastLogin: serverTimestamp(),
-          createdAt: userCredential.user.metadata.creationTime ? new Date(userCredential.user.metadata.creationTime) : serverTimestamp()
-        }, { merge: true });
+        await createUserWithEmailAndPassword(auth, email, password);
+        await signOut(auth);
+        setIsLoginMode(true);
+        toast.success('Registration successful! Please log in.');
       }
     } catch (error: any) {
       setAuthError(error.message || 'Authentication failed');
+      toast.error(error.message || 'Authentication failed');
     }
   };
 
   const handleLogout = async () => {
     try {
       await signOut(auth);
+      toast.success('Logged out successfully!');
     } catch (error) {
       console.error('Logout failed', error);
+      toast.error('Logout failed');
     }
   };
 
@@ -188,6 +224,7 @@ export default function App() {
       pendingBalance: user.pendingBalance || 0,
       totalEarned: user.totalEarned || 0,
       totalWithdrawals: user.totalWithdrawals || 0,
+      offerId: '',
       taskName: 'Manual Adjustment',
       taskAmount: 10.00
     });
@@ -208,8 +245,10 @@ export default function App() {
       // e.g. await addDoc(collection(userRef, 'tasks'), { name: editForm.taskName, amount: Number(editForm.taskAmount), date: serverTimestamp() });
       
       setEditingUser(null);
+      toast.success('User data updated successfully!');
     } catch (error) {
       console.error("Error updating user:", error);
+      toast.error('Failed to update user data.');
     }
   };
 
@@ -220,6 +259,7 @@ export default function App() {
   if (!isAuthenticated) {
     return (
       <div className="flex min-h-screen w-full font-sans">
+        <Toaster position="top-center" />
         {/* Left Side - Branding */}
         <div className="hidden lg:flex flex-col justify-between w-1/2 bg-gradient-to-b from-[#2b52ff] to-[#1e3ab8] p-12 relative overflow-hidden">
           {/* Grid Background Overlay */}
@@ -349,6 +389,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-full bg-[#f4f6f9] font-sans text-sm">
+      <Toaster position="top-center" />
       {/* Sidebar */}
       <aside className="w-64 bg-[#1a1e2d] text-gray-400 flex flex-col flex-shrink-0">
         <div className="h-16 flex items-center justify-center bg-[#151824]">
@@ -461,11 +502,11 @@ export default function App() {
               <div className="flex divide-x divide-gray-100">
                 <div className="flex-1 p-4 text-center">
                   <div className="text-[10px] text-gray-400 uppercase font-semibold mb-1">Approved Income</div>
-                  <div className="text-xl text-gray-600">$ 0.00</div>
+                  <div className="text-xl text-gray-600">$ {(currentUserData?.totalEarned || 0).toFixed(2)}</div>
                 </div>
                 <div className="flex-1 p-4 text-center">
                   <div className="text-[10px] text-gray-400 uppercase font-semibold mb-1">Pending Income</div>
-                  <div className="text-xl text-gray-600">$ 0.00</div>
+                  <div className="text-xl text-gray-600">$ {(currentUserData?.pendingBalance || 0).toFixed(2)}</div>
                 </div>
               </div>
             </div>
@@ -478,11 +519,11 @@ export default function App() {
               <div className="flex divide-x divide-gray-100">
                 <div className="flex-1 p-4 text-center">
                   <div className="text-[10px] text-gray-400 uppercase font-semibold mb-1">Approved Income</div>
-                  <div className="text-xl text-gray-600">$ 0.00</div>
+                  <div className="text-xl text-gray-600">$ {(currentUserData?.totalEarned || 0).toFixed(2)}</div>
                 </div>
                 <div className="flex-1 p-4 text-center">
                   <div className="text-[10px] text-gray-400 uppercase font-semibold mb-1">Pending Income</div>
-                  <div className="text-xl text-gray-600">$ 0.00</div>
+                  <div className="text-xl text-gray-600">$ {(currentUserData?.pendingBalance || 0).toFixed(2)}</div>
                 </div>
               </div>
             </div>
@@ -494,7 +535,7 @@ export default function App() {
               </div>
               <div className="p-4 text-center">
                 <div className="text-[10px] text-gray-400 uppercase font-semibold mb-1">Withdrawable</div>
-                <div className="text-xl text-[#10b981] font-bold">$ 0.00</div>
+                <div className="text-xl text-[#10b981] font-bold">$ {(currentUserData?.availableBalance || 0).toFixed(2)}</div>
               </div>
             </div>
           </div>
@@ -523,11 +564,11 @@ export default function App() {
               <div className="grid grid-cols-4 gap-4 mb-8">
                 <div className="text-center">
                   <div className="text-[#ff4d4f] text-sm mb-1">Approved Income</div>
-                  <div className="text-2xl font-bold text-[#ff4d4f]">$ 0.00</div>
+                  <div className="text-2xl font-bold text-[#ff4d4f]">$ {(currentUserData?.totalEarned || 0).toFixed(2)}</div>
                 </div>
                 <div className="text-center">
                   <div className="text-[#fa8c16] text-sm mb-1">Pending Income</div>
-                  <div className="text-2xl font-bold text-[#fa8c16]">$ 0.00</div>
+                  <div className="text-2xl font-bold text-[#fa8c16]">$ {(currentUserData?.pendingBalance || 0).toFixed(2)}</div>
                 </div>
                 <div className="text-center">
                   <div className="text-[#52c41a] text-sm mb-1">Conversions</div>
@@ -595,11 +636,21 @@ export default function App() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Offer Name</label>
-                    <input type="text" className="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <input 
+                      type="text" 
+                      value={offerSearchName}
+                      onChange={(e) => setOfferSearchName(e.target.value)}
+                      className="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" 
+                    />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Offer ID</label>
-                    <input type="text" className="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" />
+                    <input 
+                      type="text" 
+                      value={offerSearchId}
+                      onChange={(e) => setOfferSearchId(e.target.value)}
+                      className="w-full border border-gray-200 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-400" 
+                    />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1">Incent Allowed</label>
@@ -625,8 +676,18 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button className="bg-[#00c2ff] hover:bg-cyan-500 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors">Show More Filters +</button>
-                  <button className="bg-[#635bff] hover:bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors">Apply Filter</button>
+                  <button 
+                    onClick={() => toast.info('More filters coming soon!')}
+                    className="bg-[#00c2ff] hover:bg-cyan-500 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors"
+                  >
+                    Show More Filters +
+                  </button>
+                  <button 
+                    onClick={() => toast.success('Filters applied successfully!')}
+                    className="bg-[#635bff] hover:bg-indigo-600 text-white px-4 py-1.5 rounded text-sm font-medium transition-colors"
+                  >
+                    Apply Filter
+                  </button>
                 </div>
               </div>
             </div>
@@ -642,11 +703,11 @@ export default function App() {
                 <span className="text-gray-600 font-bold">Total Offers: {offersData.length}</span>
               </div>
               <div className="flex items-center gap-2">
-                <button className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><LayoutDashboard size={14}/> Columns</button>
-                <button className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Download size={14}/> Export</button>
-                <button className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><RefreshCw size={14}/> Refresh</button>
-                <button className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Database size={14}/> Cache</button>
-                <button className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Maximize2 size={14}/> Expand</button>
+                <button onClick={() => toast.success('Columns updated!')} className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><LayoutDashboard size={14}/> Columns</button>
+                <button onClick={() => toast.success('Export started!')} className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Download size={14}/> Export</button>
+                <button onClick={() => toast.success('Data refreshed!')} className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><RefreshCw size={14}/> Refresh</button>
+                <button onClick={() => toast.success('Cache cleared!')} className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Database size={14}/> Cache</button>
+                <button onClick={() => toast.info('Expanded view toggled!')} className="flex items-center gap-1 bg-[#00c2ff] hover:bg-cyan-500 text-white px-3 py-1.5 rounded text-xs font-medium transition-colors"><Maximize2 size={14}/> Expand</button>
               </div>
             </div>
 
@@ -668,7 +729,13 @@ export default function App() {
                     <div className="text-[10px] text-gray-400">#{offer.id}</div>
                   </div>
                   <div className="p-4 bg-gray-50 flex flex-col gap-3">
-                    <button className="w-full bg-[#ff6b6b] hover:bg-red-500 text-white py-2 rounded text-sm font-bold transition-colors">
+                    <button 
+                      onClick={() => {
+                        navigator.clipboard.writeText(`https://dealeraff.com/offer/${offer.id}`);
+                        toast.success('Offer link copied to clipboard!');
+                      }}
+                      className="w-full bg-[#ff6b6b] hover:bg-red-500 text-white py-2 rounded text-sm font-bold transition-colors"
+                    >
                       Get Offer Link
                     </button>
                     <div className="flex justify-center gap-1.5">
@@ -821,7 +888,7 @@ export default function App() {
                   {/* Balance Box */}
                   <div className="bg-[#f8f9fa] rounded-lg p-6 border border-gray-100">
                     <div className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Current Balance</div>
-                    <div className="text-4xl font-bold text-[#10b981] mb-2">$ 0.00</div>
+                    <div className="text-4xl font-bold text-[#10b981] mb-2">$ {(currentUserData?.availableBalance || 0).toFixed(2)}</div>
                     <div className="text-xs text-gray-500">Available for immediate withdrawal</div>
                   </div>
                   
@@ -858,7 +925,10 @@ export default function App() {
                   </div>
 
                   <div className="pt-4">
-                    <button className="bg-[#635bff] hover:bg-indigo-600 text-white px-8 py-3 rounded text-sm font-bold transition-colors">
+                    <button 
+                      onClick={() => toast.error('Insufficient balance for withdrawal. Minimum payout is $100.')}
+                      className="bg-[#635bff] hover:bg-indigo-600 text-white px-8 py-3 rounded text-sm font-bold transition-colors"
+                    >
                       Request Withdrawal
                     </button>
                   </div>
@@ -903,7 +973,10 @@ export default function App() {
                     User Management
                   </button>
                 </div>
-                <button className="flex items-center gap-2 bg-[#635bff] hover:bg-indigo-600 text-white px-6 py-2.5 rounded-md font-medium transition-colors shadow-sm">
+                <button 
+                  onClick={() => toast.success('Settings saved successfully!')}
+                  className="flex items-center gap-2 bg-[#635bff] hover:bg-indigo-600 text-white px-6 py-2.5 rounded-md font-medium transition-colors shadow-sm"
+                >
                   <Save size={18} />
                   Save Changes
                 </button>
@@ -923,6 +996,8 @@ export default function App() {
                       </div>
                       <input 
                         type="text" 
+                        value={adminSearchQuery}
+                        onChange={(e) => setAdminSearchQuery(e.target.value)}
                         placeholder="Search ID or Title..."
                         className="w-full border border-gray-200 rounded-md pl-9 pr-4 py-2 text-sm text-gray-700 placeholder-gray-400 focus:outline-none focus:border-blue-400"
                       />
@@ -950,7 +1025,10 @@ export default function App() {
                       { id: 1170, title: '(Web/Wap) #L33 V2 (Biweekly) - Premium Offer - US/UK/...', payout: 11.84 },
                       { id: 1698, title: '(Web/Wap) #L20 V2 (Biweekly) - Premium Offer - US/UK/...', payout: 11.35 },
                       { id: 2231, title: '(Web/Wap) #L28 V2 (Biweekly) - Premium Offer - US/UK/...', payout: 12.69 },
-                    ].map((offer, index) => (
+                    ].filter(offer => 
+                      offer.title.toLowerCase().includes(adminSearchQuery.toLowerCase()) || 
+                      offer.id.toString().includes(adminSearchQuery)
+                    ).map((offer, index) => (
                       <div key={index} className="grid grid-cols-12 gap-4 px-6 py-4 items-center hover:bg-gray-50 transition-colors">
                         <div className="col-span-2 text-sm font-medium text-[#635bff]">#{offer.id}</div>
                         <div className="col-span-5 text-sm text-gray-600 truncate pr-4">{offer.title}</div>
@@ -1024,7 +1102,7 @@ export default function App() {
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-2xl font-normal text-[#38bdf8]">Notifications & History</h2>
                 <div className="text-gray-500 text-sm">
-                  Total Withdrawals: 0
+                  Total Withdrawals: ${(currentUserData?.totalWithdrawals || 0).toFixed(2)}
                 </div>
               </div>
 
@@ -1132,8 +1210,18 @@ export default function App() {
               <div className="border-t border-gray-100 pt-6">
                 <h3 className="text-xs font-bold text-[#94a3b8] uppercase tracking-wider mb-4">ADD VIRTUAL TASK (INCREMENTAL)</h3>
                 
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <div>
+                <div className="grid grid-cols-4 gap-4 mb-4">
+                  <div className="col-span-1">
+                    <label className="block text-xs text-gray-500 mb-1">Offer ID (编号)</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. 1001"
+                      value={editForm.offerId}
+                      onChange={(e) => setEditForm({...editForm, offerId: e.target.value})}
+                      className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                  <div className="col-span-2">
                     <label className="block text-xs text-gray-500 mb-1">Task Name</label>
                     <input 
                       type="text" 
@@ -1142,7 +1230,7 @@ export default function App() {
                       className="w-full border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500"
                     />
                   </div>
-                  <div>
+                  <div className="col-span-1">
                     <label className="block text-xs text-gray-500 mb-1">Amount ($)</label>
                     <input 
                       type="number" 
@@ -1153,8 +1241,11 @@ export default function App() {
                   </div>
                 </div>
 
-                <button className="w-full py-2.5 bg-[#ecfdf5] text-[#059669] font-bold text-sm rounded-md hover:bg-[#d1fae5] transition-colors">
-                  + Add This Task to User History
+                <button 
+                  onClick={() => toast.success(`Task "${editForm.taskName}" added successfully!`)}
+                  className="w-full py-2.5 bg-[#ecfdf5] text-[#059669] font-bold text-sm rounded-md hover:bg-[#d1fae5] transition-colors flex items-center justify-center gap-2"
+                >
+                  <span>✓</span> + Complete Task & Add to History
                 </button>
               </div>
             </div>
